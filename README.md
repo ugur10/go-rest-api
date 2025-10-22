@@ -11,6 +11,10 @@ A minimal RESTful API server written in Go, using only the standard library. Thi
 - Book domain model with JSON struct tags
 - Thread-safe in-memory repository with seeded sample data
 
+## Features (Step 3)
+- `GET /api/books` returns all books as JSON
+- `GET /api/books/{id}` returns a single book or 404 if missing
+
 More features will be added in subsequent steps.
 
 ## Getting Started
