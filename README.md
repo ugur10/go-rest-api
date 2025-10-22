@@ -105,3 +105,9 @@ gofmt -w cmd/server/main.go internal/books/*.go
 ```
 
 Feel free to build upon each commit to explore additional patterns (authentication, persistence, pagination, etc.).
+
+## Contributing
+Issues and pull requests are welcome. Please open a proposal before making large changes so the roadmap can stay aligned with the learning goals.
+
+## License
+This project is licensed under the [MIT License](LICENSE).
