@@ -9,8 +9,8 @@ import (
 func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", healthHandler)
-
-	addr := ":8080"
+   
+    addr := ":8081"
 	log.Printf("Starting server on %s", addr)
 
 	if err := http.ListenAndServe(addr, mux); err != nil {

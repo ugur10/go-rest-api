@@ -4,7 +4,7 @@ A minimal RESTful API server written in Go, using only the standard library. Thi
 
 ## Features (Step 1)
 - Go module initialized as `github.com/ugur10/go-rest-api`
-- Basic HTTP server listening on port 8080
+- Basic HTTP server listening on port 8081
 - Health check endpoint at `/health`
 
 More features will be added in subsequent steps.
@@ -15,4 +15,4 @@ More features will be added in subsequent steps.
 go run ./cmd/server
 ```
 
-Visit [http://localhost:8080/health](http://localhost:8080/health) to verify the server is running.
+Visit [http://localhost:8081/health](http://localhost:8081/health) to verify the server is running.
