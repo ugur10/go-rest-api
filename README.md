@@ -15,6 +15,10 @@ A minimal RESTful API server written in Go, using only the standard library. Thi
 - `GET /api/books` returns all books as JSON
 - `GET /api/books/{id}` returns a single book or 404 if missing
 
+## Features (Step 4)
+- `POST /api/books` accepts JSON payloads and auto-assigns IDs
+- `DELETE /api/books/{id}` removes books and returns appropriate status codes
+
 More features will be added in subsequent steps.
 
 ## Getting Started

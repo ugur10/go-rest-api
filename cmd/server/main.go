@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"strings"
@@ -46,6 +47,8 @@ func (app *application) booksHandler(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		app.listBooks(w, r)
+	case http.MethodPost:
+		app.createBook(w, r)
 	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)
 	}
@@ -61,6 +64,8 @@ func (app *application) bookHandler(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		app.getBook(w, r, id)
+	case http.MethodDelete:
+		app.deleteBook(w, r, id)
 	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)
 	}
@@ -106,6 +111,68 @@ func (app *application) getBook(w http.ResponseWriter, r *http.Request, id strin
 	}
 
 	writeJSON(w, http.StatusOK, book)
+}
+
+func (app *application) createBook(w http.ResponseWriter, r *http.Request) {
+	if !strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") {
+		w.WriteHeader(http.StatusUnsupportedMediaType)
+		return
+	}
+
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	defer r.Body.Close()
+
+	var payload struct {
+		Title         string `json:"title"`
+		Author        string `json:"author"`
+		ISBN          string `json:"isbn"`
+		PublishedYear int    `json:"publishedYear"`
+	}
+
+	if err := json.Unmarshal(body, &payload); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	if payload.Title == "" || payload.Author == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	book := books.Book{
+		Title:         payload.Title,
+		Author:        payload.Author,
+		ISBN:          payload.ISBN,
+		PublishedYear: payload.PublishedYear,
+	}
+
+	created, err := app.store.Create(r.Context(), book)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Location", fmt.Sprintf("/api/books/%s", created.ID))
+	writeJSON(w, http.StatusCreated, created)
+}
+
+func (app *application) deleteBook(w http.ResponseWriter, r *http.Request, id string) {
+	deleted, err := app.store.Delete(r.Context(), id)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	if !deleted {
+		http.NotFound(w, r)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
