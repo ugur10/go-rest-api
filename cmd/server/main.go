@@ -19,23 +19,28 @@ var (
 	errInvalidPayload       = errors.New("invalid payload")
 )
 
+// application bundles the dependencies required by HTTP handlers.
 type application struct {
 	store books.Repository
 }
 
+// middleware is a function that decorates an http.Handler.
 type middleware func(http.Handler) http.Handler
 
+// responseRecorder captures status and body size for logging middleware.
 type responseRecorder struct {
 	http.ResponseWriter
 	status int
 	size   int
 }
 
+// WriteHeader stores the status code before delegating to the underlying writer.
 func (rr *responseRecorder) WriteHeader(code int) {
 	rr.status = code
 	rr.ResponseWriter.WriteHeader(code)
 }
 
+// Write records the response size while streaming to the client.
 func (rr *responseRecorder) Write(b []byte) (int, error) {
 	if rr.status == 0 {
 		rr.status = http.StatusOK
@@ -46,6 +51,7 @@ func (rr *responseRecorder) Write(b []byte) (int, error) {
 	return n, err
 }
 
+// chain wraps a handler with the supplied middleware in declaration order.
 func chain(h http.Handler, middlewares ...middleware) http.Handler {
 	for i := len(middlewares) - 1; i >= 0; i-- {
 		h = middlewares[i](h)
@@ -53,6 +59,7 @@ func chain(h http.Handler, middlewares ...middleware) http.Handler {
 	return h
 }
 
+// main wires dependencies and starts the HTTP server.
 func main() {
 	store := books.NewMemoryRepository(books.SeedData())
 	app := &application{store: store}
@@ -72,6 +79,7 @@ func main() {
 	}
 }
 
+// loggingMiddleware emits request method/path/response metrics for each call.
 func (app *application) loggingMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
@@ -88,6 +96,7 @@ func (app *application) loggingMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+// corsMiddleware enables cross-origin requests and handles preflight checks.
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -104,6 +113,7 @@ func corsMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+// healthHandler reports basic server liveness.
 func (app *application) healthHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.WriteHeader(http.StatusMethodNotAllowed)
@@ -114,6 +124,7 @@ func (app *application) healthHandler(w http.ResponseWriter, r *http.Request) {
 	_, _ = fmt.Fprint(w, `{"status":"ok"}`)
 }
 
+// booksHandler routes collection-level requests (list/create).
 func (app *application) booksHandler(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -125,6 +136,7 @@ func (app *application) booksHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// bookHandler routes item-level requests (read/update/delete).
 func (app *application) bookHandler(w http.ResponseWriter, r *http.Request) {
 	id, err := extractID(strings.TrimPrefix(r.URL.Path, "/api/books"))
 	if err != nil {
@@ -144,6 +156,7 @@ func (app *application) bookHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// extractID parses the book identifier from the request path.
 func extractID(path string) (string, error) {
 	if len(path) < 2 {
 		return "", errors.New("missing id")
@@ -161,6 +174,7 @@ func extractID(path string) (string, error) {
 	return id, nil
 }
 
+// listBooks returns the full catalogue as JSON.
 func (app *application) listBooks(w http.ResponseWriter, r *http.Request) {
 	books, err := app.store.List(r.Context())
 	if err != nil {
@@ -171,6 +185,7 @@ func (app *application) listBooks(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, books)
 }
 
+// getBook fetches a single book by ID or returns 404 if not found.
 func (app *application) getBook(w http.ResponseWriter, r *http.Request, id string) {
 	book, ok, err := app.store.Get(r.Context(), id)
 	if err != nil {
@@ -186,6 +201,7 @@ func (app *application) getBook(w http.ResponseWriter, r *http.Request, id strin
 	writeJSON(w, http.StatusOK, book)
 }
 
+// createBook inserts a new book after validating the JSON payload.
 func (app *application) createBook(w http.ResponseWriter, r *http.Request) {
 	payload, err := readBookPayload(r)
 	if err != nil {
@@ -210,6 +226,7 @@ func (app *application) createBook(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, created)
 }
 
+// updateBook replaces an existing book when the payload is valid.
 func (app *application) updateBook(w http.ResponseWriter, r *http.Request, id string) {
 	payload, err := readBookPayload(r)
 	if err != nil {
@@ -238,6 +255,7 @@ func (app *application) updateBook(w http.ResponseWriter, r *http.Request, id st
 	writeJSON(w, http.StatusOK, updated)
 }
 
+// deleteBook removes the book identified by id, returning 404 if missing.
 func (app *application) deleteBook(w http.ResponseWriter, r *http.Request, id string) {
 	deleted, err := app.store.Delete(r.Context(), id)
 	if err != nil {
@@ -253,6 +271,7 @@ func (app *application) deleteBook(w http.ResponseWriter, r *http.Request, id st
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// bookPayload mirrors the expected JSON body for create/update operations.
 type bookPayload struct {
 	Title         string `json:"title"`
 	Author        string `json:"author"`
@@ -260,6 +279,7 @@ type bookPayload struct {
 	PublishedYear int    `json:"publishedYear"`
 }
 
+// readBookPayload validates headers, limits body size, and decodes JSON input.
 func readBookPayload(r *http.Request) (bookPayload, error) {
 	if !strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") {
 		return bookPayload{}, errUnsupportedMediaType
@@ -288,6 +308,7 @@ func readBookPayload(r *http.Request) (bookPayload, error) {
 	return payload, nil
 }
 
+// handlePayloadError maps payload parsing failures to HTTP responses.
 func handlePayloadError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, errUnsupportedMediaType):
@@ -301,6 +322,7 @@ func handlePayloadError(w http.ResponseWriter, err error) {
 	}
 }
 
+// writeJSON serialises the supplied value as JSON with the provided status.
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
