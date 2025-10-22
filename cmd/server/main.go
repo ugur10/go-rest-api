@@ -1,13 +1,17 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/ugur10/go-rest-api/internal/books"
@@ -21,7 +25,8 @@ var (
 
 // application bundles the dependencies required by HTTP handlers.
 type application struct {
-	store books.Repository
+	store   books.Repository
+	timeout time.Duration
 }
 
 // middleware is a function that decorates an http.Handler.
@@ -62,7 +67,7 @@ func chain(h http.Handler, middlewares ...middleware) http.Handler {
 // main wires dependencies and starts the HTTP server.
 func main() {
 	store := books.NewMemoryRepository(books.SeedData())
-	app := &application{store: store}
+	app := &application{store: store, timeout: 10 * time.Second}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", app.healthHandler)
@@ -72,11 +77,46 @@ func main() {
 	addr := ":8081"
 	log.Printf("Starting server on %s", addr)
 
-	handler := chain(mux, app.loggingMiddleware, corsMiddleware)
+	handler := chain(mux, app.timeoutMiddleware, app.loggingMiddleware, corsMiddleware)
 
-	if err := http.ListenAndServe(addr, handler); err != nil {
-		log.Fatalf("server failed: %v", err)
+	srv := &http.Server{Addr: addr, Handler: handler}
+
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatalf("server failed: %v", err)
+		}
+	}()
+
+	shutdown(srv)
+}
+
+// shutdown blocks until an interrupt signal is received and then gracefully stops the server.
+func shutdown(srv *http.Server) {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	<-ctx.Done()
+	log.Println("Shutdown signal received, stopping server")
+
+	ctxTimeout, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := srv.Shutdown(ctxTimeout); err != nil {
+		log.Printf("graceful shutdown failed: %v", err)
+		if err := srv.Close(); err != nil {
+			log.Printf("forced close failed: %v", err)
+		}
 	}
+}
+
+// timeoutMiddleware attaches a deadline to each request context.
+func (app *application) timeoutMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithTimeout(r.Context(), app.timeout)
+		defer cancel()
+
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
 }
 
 // loggingMiddleware emits request method/path/response metrics for each call.
@@ -116,7 +156,7 @@ func corsMiddleware(next http.Handler) http.Handler {
 // healthHandler reports basic server liveness.
 func (app *application) healthHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		w.WriteHeader(http.StatusMethodNotAllowed)
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 
@@ -132,7 +172,7 @@ func (app *application) booksHandler(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPost:
 		app.createBook(w, r)
 	default:
-		w.WriteHeader(http.StatusMethodNotAllowed)
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
 }
 
@@ -140,7 +180,7 @@ func (app *application) booksHandler(w http.ResponseWriter, r *http.Request) {
 func (app *application) bookHandler(w http.ResponseWriter, r *http.Request) {
 	id, err := extractID(strings.TrimPrefix(r.URL.Path, "/api/books"))
 	if err != nil {
-		http.NotFound(w, r)
+		writeError(w, http.StatusNotFound, "book not found")
 		return
 	}
 
@@ -152,7 +192,7 @@ func (app *application) bookHandler(w http.ResponseWriter, r *http.Request) {
 	case http.MethodDelete:
 		app.deleteBook(w, r, id)
 	default:
-		w.WriteHeader(http.StatusMethodNotAllowed)
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
 }
 
@@ -178,7 +218,11 @@ func extractID(path string) (string, error) {
 func (app *application) listBooks(w http.ResponseWriter, r *http.Request) {
 	books, err := app.store.List(r.Context())
 	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "failed to list books")
+		return
+	}
+
+	if contextDone(w, r.Context()) {
 		return
 	}
 
@@ -189,12 +233,16 @@ func (app *application) listBooks(w http.ResponseWriter, r *http.Request) {
 func (app *application) getBook(w http.ResponseWriter, r *http.Request, id string) {
 	book, ok, err := app.store.Get(r.Context(), id)
 	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "failed to fetch book")
+		return
+	}
+
+	if contextDone(w, r.Context()) {
 		return
 	}
 
 	if !ok {
-		http.NotFound(w, r)
+		writeError(w, http.StatusNotFound, "book not found")
 		return
 	}
 
@@ -218,7 +266,11 @@ func (app *application) createBook(w http.ResponseWriter, r *http.Request) {
 
 	created, err := app.store.Create(r.Context(), book)
 	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "failed to create book")
+		return
+	}
+
+	if contextDone(w, r.Context()) {
 		return
 	}
 
@@ -243,12 +295,16 @@ func (app *application) updateBook(w http.ResponseWriter, r *http.Request, id st
 
 	updated, ok, err := app.store.Update(r.Context(), id, book)
 	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "failed to update book")
+		return
+	}
+
+	if contextDone(w, r.Context()) {
 		return
 	}
 
 	if !ok {
-		http.NotFound(w, r)
+		writeError(w, http.StatusNotFound, "book not found")
 		return
 	}
 
@@ -259,12 +315,16 @@ func (app *application) updateBook(w http.ResponseWriter, r *http.Request, id st
 func (app *application) deleteBook(w http.ResponseWriter, r *http.Request, id string) {
 	deleted, err := app.store.Delete(r.Context(), id)
 	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "failed to delete book")
+		return
+	}
+
+	if contextDone(w, r.Context()) {
 		return
 	}
 
 	if !deleted {
-		http.NotFound(w, r)
+		writeError(w, http.StatusNotFound, "book not found")
 		return
 	}
 
@@ -312,14 +372,35 @@ func readBookPayload(r *http.Request) (bookPayload, error) {
 func handlePayloadError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, errUnsupportedMediaType):
-		w.WriteHeader(http.StatusUnsupportedMediaType)
+		writeError(w, http.StatusUnsupportedMediaType, "content type must be application/json")
 	case errors.Is(err, errInvalidJSON):
-		w.WriteHeader(http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "invalid JSON payload")
 	case errors.Is(err, errInvalidPayload):
-		w.WriteHeader(http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "title and author are required")
 	default:
-		w.WriteHeader(http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "invalid request body")
 	}
+}
+
+// contextDone inspects the request context and writes a timeout response if needed.
+func contextDone(w http.ResponseWriter, ctx context.Context) bool {
+	if err := ctx.Err(); err != nil {
+		switch {
+		case errors.Is(err, context.DeadlineExceeded):
+			writeError(w, http.StatusGatewayTimeout, "request timed out")
+		case errors.Is(err, context.Canceled):
+			writeError(w, http.StatusRequestTimeout, "request canceled")
+		default:
+			writeError(w, http.StatusRequestTimeout, "request canceled")
+		}
+		return true
+	}
+	return false
+}
+
+// writeError emits a JSON error response with the given status code.
+func writeError(w http.ResponseWriter, status int, message string) {
+	writeJSON(w, status, map[string]string{"error": message})
 }
 
 // writeJSON serialises the supplied value as JSON with the provided status.
