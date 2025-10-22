@@ -7,6 +7,10 @@ A minimal RESTful API server written in Go, using only the standard library. Thi
 - Basic HTTP server listening on port 8081
 - Health check endpoint at `/health`
 
+## Features (Step 2)
+- Book domain model with JSON struct tags
+- Thread-safe in-memory repository with seeded sample data
+
 More features will be added in subsequent steps.
 
 ## Getting Started
