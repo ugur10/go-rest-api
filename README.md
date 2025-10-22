@@ -19,6 +19,11 @@ A minimal RESTful API server written in Go, using only the standard library. Thi
 - `POST /api/books` accepts JSON payloads and auto-assigns IDs
 - `DELETE /api/books/{id}` removes books and returns appropriate status codes
 
+## Features (Step 5)
+- `PUT /api/books/{id}` updates existing books with validation
+- Structured logging middleware captures method, path, status, and duration
+- CORS middleware enables cross-origin access and handles preflight requests
+
 More features will be added in subsequent steps.
 
 ## Getting Started

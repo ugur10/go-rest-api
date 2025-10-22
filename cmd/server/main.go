@@ -8,12 +8,49 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/ugur10/go-rest-api/internal/books"
 )
 
+var (
+	errUnsupportedMediaType = errors.New("unsupported media type")
+	errInvalidJSON          = errors.New("invalid json")
+	errInvalidPayload       = errors.New("invalid payload")
+)
+
 type application struct {
 	store books.Repository
+}
+
+type middleware func(http.Handler) http.Handler
+
+type responseRecorder struct {
+	http.ResponseWriter
+	status int
+	size   int
+}
+
+func (rr *responseRecorder) WriteHeader(code int) {
+	rr.status = code
+	rr.ResponseWriter.WriteHeader(code)
+}
+
+func (rr *responseRecorder) Write(b []byte) (int, error) {
+	if rr.status == 0 {
+		rr.status = http.StatusOK
+	}
+
+	n, err := rr.ResponseWriter.Write(b)
+	rr.size += n
+	return n, err
+}
+
+func chain(h http.Handler, middlewares ...middleware) http.Handler {
+	for i := len(middlewares) - 1; i >= 0; i-- {
+		h = middlewares[i](h)
+	}
+	return h
 }
 
 func main() {
@@ -28,9 +65,43 @@ func main() {
 	addr := ":8081"
 	log.Printf("Starting server on %s", addr)
 
-	if err := http.ListenAndServe(addr, mux); err != nil {
+	handler := chain(mux, app.loggingMiddleware, corsMiddleware)
+
+	if err := http.ListenAndServe(addr, handler); err != nil {
 		log.Fatalf("server failed: %v", err)
 	}
+}
+
+func (app *application) loggingMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		rr := &responseRecorder{ResponseWriter: w}
+
+		next.ServeHTTP(rr, r)
+
+		status := rr.status
+		if status == 0 {
+			status = http.StatusOK
+		}
+
+		log.Printf("%s %s %d %dB %s", r.Method, r.URL.Path, status, rr.size, time.Since(start))
+	})
+}
+
+func corsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		w.Header().Set("Access-Control-Expose-Headers", "Location")
+
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (app *application) healthHandler(w http.ResponseWriter, r *http.Request) {
@@ -64,6 +135,8 @@ func (app *application) bookHandler(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		app.getBook(w, r, id)
+	case http.MethodPut:
+		app.updateBook(w, r, id)
 	case http.MethodDelete:
 		app.deleteBook(w, r, id)
 	default:
@@ -114,32 +187,9 @@ func (app *application) getBook(w http.ResponseWriter, r *http.Request, id strin
 }
 
 func (app *application) createBook(w http.ResponseWriter, r *http.Request) {
-	if !strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") {
-		w.WriteHeader(http.StatusUnsupportedMediaType)
-		return
-	}
-
-	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	payload, err := readBookPayload(r)
 	if err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		return
-	}
-	defer r.Body.Close()
-
-	var payload struct {
-		Title         string `json:"title"`
-		Author        string `json:"author"`
-		ISBN          string `json:"isbn"`
-		PublishedYear int    `json:"publishedYear"`
-	}
-
-	if err := json.Unmarshal(body, &payload); err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		return
-	}
-
-	if payload.Title == "" || payload.Author == "" {
-		w.WriteHeader(http.StatusBadRequest)
+		handlePayloadError(w, err)
 		return
 	}
 
@@ -160,6 +210,34 @@ func (app *application) createBook(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, created)
 }
 
+func (app *application) updateBook(w http.ResponseWriter, r *http.Request, id string) {
+	payload, err := readBookPayload(r)
+	if err != nil {
+		handlePayloadError(w, err)
+		return
+	}
+
+	book := books.Book{
+		Title:         payload.Title,
+		Author:        payload.Author,
+		ISBN:          payload.ISBN,
+		PublishedYear: payload.PublishedYear,
+	}
+
+	updated, ok, err := app.store.Update(r.Context(), id, book)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, updated)
+}
+
 func (app *application) deleteBook(w http.ResponseWriter, r *http.Request, id string) {
 	deleted, err := app.store.Delete(r.Context(), id)
 	if err != nil {
@@ -173,6 +251,54 @@ func (app *application) deleteBook(w http.ResponseWriter, r *http.Request, id st
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+type bookPayload struct {
+	Title         string `json:"title"`
+	Author        string `json:"author"`
+	ISBN          string `json:"isbn"`
+	PublishedYear int    `json:"publishedYear"`
+}
+
+func readBookPayload(r *http.Request) (bookPayload, error) {
+	if !strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") {
+		return bookPayload{}, errUnsupportedMediaType
+	}
+
+	defer r.Body.Close()
+
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err != nil {
+		return bookPayload{}, err
+	}
+
+	var payload bookPayload
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return bookPayload{}, errInvalidJSON
+	}
+
+	payload.Title = strings.TrimSpace(payload.Title)
+	payload.Author = strings.TrimSpace(payload.Author)
+	payload.ISBN = strings.TrimSpace(payload.ISBN)
+
+	if payload.Title == "" || payload.Author == "" {
+		return bookPayload{}, errInvalidPayload
+	}
+
+	return payload, nil
+}
+
+func handlePayloadError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, errUnsupportedMediaType):
+		w.WriteHeader(http.StatusUnsupportedMediaType)
+	case errors.Is(err, errInvalidJSON):
+		w.WriteHeader(http.StatusBadRequest)
+	case errors.Is(err, errInvalidPayload):
+		w.WriteHeader(http.StatusBadRequest)
+	default:
+		w.WriteHeader(http.StatusBadRequest)
+	}
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
