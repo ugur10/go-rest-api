@@ -1,0 +1,13 @@
+# Binaries
+/go-rest-api
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Tools
+.claude/
+.DS_Store
